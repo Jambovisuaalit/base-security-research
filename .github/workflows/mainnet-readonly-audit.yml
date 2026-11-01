@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: foundry-rs/foundry-toolchain@v1
-      - name: Read pinned Base mainnet state
+      - name: Read pinned Base mainnet state with ABI-compatible getters
         env:
           RPC: https://mainnet.base.org
         shell: bash
@@ -18,15 +18,16 @@ jobs:
           BLOCK=$(cast block-number --rpc-url "$RPC")
           echo "Pinned block: $BLOCK"
           mkdir -p evidence
-          printf 'block=%s\n' "$BLOCK" > evidence/manifest.txt
+          printf 'block=%s\nnetwork=Base mainnet\nchain_id=8453\n' "$BLOCK" > evidence/manifest.txt
           IMPL_SLOT=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
           ADMIN_SLOT=0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103
+          DISBURSER=0x09C7bAD99688a55a2e83644BFAed09e62bDcCcBA
           for ADDR in \
             0x4200000000000000000000000000000000000011 \
             0x4200000000000000000000000000000000000019 \
             0x420000000000000000000000000000000000001a \
             0x420000000000000000000000000000000000001b \
-            0x09C7bAD99688a55a2e83644BFAed09e62bDcCcBA; do
+            "$DISBURSER"; do
             OUT="evidence/${ADDR}.txt"
             echo "address=$ADDR" > "$OUT"
             echo "block=$BLOCK" >> "$OUT"
@@ -37,13 +38,33 @@ jobs:
             IMPL_RAW=$(cast storage "$ADDR" "$IMPL_SLOT" --block "$BLOCK" --rpc-url "$RPC")
             IMPL="0x${IMPL_RAW: -40}"
             echo "implementation=$IMPL" >> "$OUT"
-            if [[ "$IMPL" != 0x0000000000000000000000000000000000000000 ]]; then
-              cast code "$IMPL" --block "$BLOCK" --rpc-url "$RPC" > "evidence/${ADDR}.implementation.hex"
-              sha256sum "evidence/${ADDR}.implementation.hex" >> "$OUT"
+            if [[ "$IMPL" == 0x0000000000000000000000000000000000000000 ]]; then
+              echo "::error::Proxy implementation is zero at $ADDR"; exit 1
             fi
-            if [[ "$ADDR" != 0x09C7bAD99688a55a2e83644BFAed09e62bDcCcBA ]]; then
-              for SIG in 'recipient()(address)' 'minWithdrawalAmount()(uint256)' 'withdrawalNetwork()(uint8)' 'totalProcessed()(uint256)'; do
-                echo "$SIG=$(cast call "$ADDR" "$SIG" --block "$BLOCK" --rpc-url "$RPC")" >> "$OUT"
+            CODE=$(cast code "$IMPL" --block "$BLOCK" --rpc-url "$RPC")
+            if [[ "$CODE" == "0x" || -z "$CODE" ]]; then
+              echo "::error::Implementation has no code at $IMPL"; exit 1
+            fi
+            echo "$CODE" > "evidence/${ADDR}.implementation.hex"
+            echo "implementation_code_keccak=$(cast keccak "$CODE")" >> "$OUT"
+            if [[ "$ADDR" != "$DISBURSER" ]]; then
+              # The three main FeeVaults run v1.3.0 with immutable UPPERCASE getters.
+              # OperatorFeeVault v1.0.0 supports the same legacy getters.
+              for SIG in 'RECIPIENT()(address)' 'MIN_WITHDRAWAL_AMOUNT()(uint256)' 'WITHDRAWAL_NETWORK()(uint8)' 'totalProcessed()(uint256)' 'version()(string)'; do
+                if ! VALUE=$(cast call "$ADDR" "$SIG" --block "$BLOCK" --rpc-url "$RPC" 2>&1); then
+                  echo "::error::Call failed: $ADDR $SIG: $VALUE"; exit 1
+                fi
+                if [[ -z "$VALUE" ]]; then
+                  echo "::error::Empty call result: $ADDR $SIG"; exit 1
+                fi
+                echo "$SIG=$VALUE" >> "$OUT"
+              done
+            else
+              for SIG in 'version()(string)' 'lastDisbursementTime()(uint256)'; do
+                if ! VALUE=$(cast call "$ADDR" "$SIG" --block "$BLOCK" --rpc-url "$RPC" 2>&1); then
+                  echo "::error::Call failed: $ADDR $SIG: $VALUE"; exit 1
+                fi
+                echo "$SIG=$VALUE" >> "$OUT"
               done
             fi
             cat "$OUT"

@@ -1,0 +1,76 @@
+name: H2-C Pinned Base Mainnet Fork Validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fork:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Validate unprivileged withdrawal on LOCAL fork only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          BLOCK=53374803
+          FORK=http://127.0.0.1:8545
+          BASE_RPC=https://mainnet.base.org
+          VAULT=0x4200000000000000000000000000000000000019
+          DISBURSER=0x09C7bAD99688a55a2e83644BFAed09e62bDcCcBA
+          # Anvil's documented PUBLIC dev key; never use for real funds.
+          DEV_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+          anvil --fork-url "$BASE_RPC" --fork-block-number "$BLOCK" --chain-id 8453 --port 8545 > evidence/anvil.log 2>&1 &
+          ANVIL_PID=$!
+          trap 'kill "$ANVIL_PID" 2>/dev/null || true' EXIT
+          READY=0
+          for i in $(seq 1 40); do
+            if cast block-number --rpc-url "$FORK" >/dev/null 2>&1; then READY=1; break; fi
+            sleep 2
+          done
+          [[ "$READY" == 1 ]] || { cat evidence/anvil.log; exit 1; }
+          [[ "$(cast block-number --rpc-url "$FORK")" == "$BLOCK" ]] || { echo "Wrong fork block"; exit 1; }
+          [[ "$(cast chain-id --rpc-url "$FORK")" == 8453 ]] || { echo "Wrong chain"; exit 1; }
+          RECIPIENT=$(cast call "$VAULT" 'RECIPIENT()(address)' --rpc-url "$FORK")
+          MINIMUM=$(cast call "$VAULT" 'MIN_WITHDRAWAL_AMOUNT()(uint256)' --rpc-url "$FORK" | awk '{print $1}')
+          NETWORK=$(cast call "$VAULT" 'WITHDRAWAL_NETWORK()(uint8)' --rpc-url "$FORK" | awk '{print $1}')
+          [[ "${RECIPIENT,,}" == "${DISBURSER,,}" && "$MINIMUM" == 2000000000000000000 && "$NETWORK" == 1 ]] || { echo "Unexpected mainnet settings"; exit 1; }
+          VAULT_BEFORE=$(cast balance "$VAULT" --rpc-url "$FORK")
+          DISBURSER_BEFORE=$(cast balance "$DISBURSER" --rpc-url "$FORK")
+          PROCESSED_BEFORE=$(cast call "$VAULT" 'totalProcessed()(uint256)' --rpc-url "$FORK" | awk '{print $1}')
+          [[ "$VAULT_BEFORE" -ge "$MINIMUM" ]] || { echo "Below withdrawal threshold"; exit 1; }
+          # Local-only transaction: this endpoint is an Anvil process, NOT Base mainnet.
+          cast send "$VAULT" 'withdraw()' --private-key "$DEV_KEY" --rpc-url "$FORK" --json > evidence/local-receipt.json
+          VAULT_AFTER=$(cast balance "$VAULT" --rpc-url "$FORK")
+          DISBURSER_AFTER=$(cast balance "$DISBURSER" --rpc-url "$FORK")
+          PROCESSED_AFTER=$(cast call "$VAULT" 'totalProcessed()(uint256)' --rpc-url "$FORK" | awk '{print $1}')
+          python3 - "$VAULT_BEFORE" "$VAULT_AFTER" "$DISBURSER_BEFORE" "$DISBURSER_AFTER" "$PROCESSED_BEFORE" "$PROCESSED_AFTER" <<'PY'
+          import sys
+          vb, va, db, da, pb, pa = map(int, sys.argv[1:])
+          assert va == 0, "vault must be emptied"
+          assert da - db == vb, "disburser must receive exactly withdrawn ETH"
+          assert pa - pb == vb, "processed counter must rise exactly once"
+          print(f"PASS: vault={vb} wei, disburser delta={da-db}, processed delta={pa-pb}")
+          PY
+          {
+            echo "fork_block=$BLOCK"
+            echo "rpc=$FORK (local Anvil only)"
+            echo "vault=$VAULT"
+            echo "recipient=$RECIPIENT"
+            echo "min_wei=$MINIMUM"
+            echo "network=$NETWORK"
+            echo "vault_before_wei=$VAULT_BEFORE"
+            echo "vault_after_wei=$VAULT_AFTER"
+            echo "disburser_before_wei=$DISBURSER_BEFORE"
+            echo "disburser_after_wei=$DISBURSER_AFTER"
+            echo "total_processed_before_wei=$PROCESSED_BEFORE"
+            echo "total_processed_after_wei=$PROCESSED_AFTER"
+          } > evidence/results.txt
+          cat evidence/results.txt
+      - name: Upload local-fork evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2c-local-fork-evidence
+          path: evidence/

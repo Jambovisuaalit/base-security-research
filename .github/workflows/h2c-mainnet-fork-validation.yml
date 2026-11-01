@@ -45,13 +45,26 @@ jobs:
           VAULT_AFTER=$(cast balance "$VAULT" --rpc-url "$FORK")
           DISBURSER_AFTER=$(cast balance "$DISBURSER" --rpc-url "$FORK")
           PROCESSED_AFTER=$(cast call "$VAULT" 'totalProcessed()(uint256)' --rpc-url "$FORK" | awk '{print $1}')
-          python3 - "$VAULT_BEFORE" "$VAULT_AFTER" "$DISBURSER_BEFORE" "$DISBURSER_AFTER" "$PROCESSED_BEFORE" "$PROCESSED_AFTER" <<'PY'
-          import sys
-          vb, va, db, da, pb, pa = map(int, sys.argv[1:])
-          assert va == 0, "vault must be emptied"
+          python3 - "$VAULT_BEFORE" "$VAULT_AFTER" "$DISBURSER_BEFORE" "$DISBURSER_AFTER" "$PROCESSED_BEFORE" "$PROCESSED_AFTER" "$DISBURSER" <<'PY'
+          import json, sys
+          vb, va, db, da, pb, pa = map(int, sys.argv[1:7])
+          recipient = sys.argv[7].lower()
+          with open("evidence/local-receipt.json") as f:
+              receipt = json.load(f)
+          gas_used = int(receipt["gasUsed"], 16)
+          gas_price = int(receipt["effectiveGasPrice"], 16)
+          tx_fee = gas_used * gas_price
+          assert int(receipt["status"], 16) == 1, "fork transaction reverted"
+          received = [log for log in receipt["logs"] if log["address"].lower() == recipient]
+          assert len(received) == 1, "expected one FeeDisburser receive event"
+          assert int(received[0]["data"], 16) == vb, "FeesReceived value mismatch"
           assert da - db == vb, "disburser must receive exactly withdrawn ETH"
           assert pa - pb == vb, "processed counter must rise exactly once"
-          print(f"PASS: vault={vb} wei, disburser delta={da-db}, processed delta={pa-pb}")
+          # A BaseFeeVault withdrawal itself pays L2 fees, which accrue to the vault in the new block.
+          assert 0 <= va <= tx_fee, "unexpected remaining vault balance after fee accrual"
+          print(f"PASS: local receipt status=1; withdrawn={vb}; disburser_delta={da-db}; processed_delta={pa-pb}; vault_new_fees={va}; max_tx_fee={tx_fee} wei")
+          with open("evidence/assertions.json", "w") as f:
+              json.dump({"status": "PASS", "withdrawn_wei": vb, "vault_residual_wei": va, "transaction_fee_wei": tx_fee, "disburser_delta_wei": da-db, "processed_delta_wei": pa-pb, "fee_disburser_receive_events": len(received)}, f, indent=2)
           PY
           {
             echo "fork_block=$BLOCK"

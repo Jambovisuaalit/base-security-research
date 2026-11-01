@@ -1,4 +1,4 @@
-name: Base FeeVault H1 (standalone)
+name: Base FeeVault H1 + H2 (standalone)
 
 on:
   workflow_dispatch:
@@ -39,8 +39,9 @@ jobs:
           solady https://github.com/Vectorized/solady.git 502cc1ea718e6fa73b380635ee0868b0740595f0
           nitro-validator https://github.com/base/nitro-validator.git 0ea0d12366b4fa44f9e07e4755f2ad36561cb674
           DEPS
-      - name: Run FeeVault H1
+      - name: Run FeeVault H1 and H2
         working-directory: contracts
         run: |
           cp ../research/test/L2/FeeVaultReentrancyH1.t.sol test/L2/FeeVaultReentrancyH1.t.sol
-          forge test --match-contract FeeVaultReentrancyH1_Test -vvv
+          cp ../research/test/L2/FeeVaultH2.t.sol test/L2/FeeVaultH2.t.sol
+          forge test --match-contract 'FeeVault(ReentrancyH1|H2)_Test' -vvv

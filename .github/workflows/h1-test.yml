@@ -1,0 +1,29 @@
+name: Base FeeVault H1 (standalone)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout official Base contracts
+        uses: actions/checkout@v4
+        with:
+          repository: base/contracts
+          submodules: recursive
+          path: contracts
+      - name: Checkout research tests
+        uses: actions/checkout@v4
+        with:
+          path: research
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Run FeeVault H1
+        working-directory: contracts
+        run: |
+          cp ../research/test/L2/FeeVaultReentrancyH1.t.sol test/L2/FeeVaultReentrancyH1.t.sol
+          forge test --match-contract FeeVaultReentrancyH1_Test -vvv

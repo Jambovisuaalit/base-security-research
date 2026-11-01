@@ -1,0 +1,33 @@
+name: H3-A H3-B Pinned Base Fork Invariants
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  h3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Start local pinned Anvil fork and validate H3-A / H3-B
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/h3
+          anvil --fork-url https://mainnet.base.org --fork-block-number 53374803 --chain-id 8453 --port 8545 > evidence/h3/anvil.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          READY=0
+          for i in $(seq 1 45); do
+            if cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then READY=1; break; fi
+            sleep 2
+          done
+          [[ "$READY" == 1 ]] || { tail -100 evidence/h3/anvil.log; exit 1; }
+          python3 scripts/h3_fork_validate.py
+      - name: Upload H3 evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h3-a-h3-b-local-fork-evidence
+          path: evidence/h3/
